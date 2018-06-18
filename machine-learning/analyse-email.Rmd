@@ -1,0 +1,223 @@
+---
+title: "Analyse des emails"
+output: html_notebook
+author : Julien VALERA
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+---
+
+#1. Etapes préliminaires
+
+###1.1 Importation des bibliothèques
+
+* package dummies : transformation des variables catégorielles en variables binaires
+* package rpart : construction des arbres de décision (CART)
+
+```{r include=FALSE}
+install.packages("dummies")
+install.packages("rpart")
+library(dummies)
+library(rpart)
+```
+
+###1.2 Chargement des données
+```{r}
+data <- read.csv("data.csv",encoding="UTF-8", stringsAsFactors=FALSE)
+```
+
+* Recency: Months since last purchase.
+* History_Segment: Categorization of dollars spent in the past year.
+* History: Actual dollar value spent in the past year.
+* Mens: 1/0 indicator, 1 = customer purchased Mens merchandise in the past year.
+* Womens: 1/0 indicator, 1 = customer purchased Womens merchandise in the past year.
+* Zip_Code: Classifies zip code as Urban, Suburban, or Rural.
+* Newbie: 1/0 indicator, 1 = New customer in the past twelve months.
+* Channel: Describes the channels the customer purchased from in the past year.
+* Visit: 1/0 indicator, 1 = Customer visited website in the following two weeks.
+* Conversion: 1/0 indicator, 1 = Customer purchased merchandise in the following two weeks.
+* Spend: Actual dollars spent in the following two weeks.
+* Segment : Mens E-Mail, Womens E-Mail, No E-Mail
+
+```{r echo=TRUE}
+head(data)
+```
+
+#2. Transformation des données
+### Suppression de *history_segment*
+La colonne de valeurs associées à la variable *history_segment* est redondante avec *history*. On la supprime donc de notre tableau de données.
+```{r}
+data <- subset(data, select=-history_segment)
+```
+
+### Transformation des variables catégorielles en variables binaires
+Dans cette partie, les données importées sont transformées de manière à les adapter à un modèle de Machine Learning. Il s'agit de transformer les catégories avec un flag 0 ou 1. 
+Les variables *zip_code*, *channel* et *segment* sont des variables qualitatives nominales. Elles sont donc remplacées par des valeurs binaires. Autrement dit, nous allons rajouter pour chaque modalité, une nouvelle colonne.
+
+```{r echo=TRUE}
+col_categorial = c("zip_code","channel","segment")
+for(c in col_categorial) {
+  data <- cbind(data,get.dummy(dummy.data.frame(data,sep="."),c))
+  cat(c," [")
+  cat(unique(data[[c]]),sep=", ")
+  cat("]\n")
+}
+colnames(data) <- gsub(".*\\.","",colnames(data))
+```
+
+Voici un exemple de transformation pour la variable *channel* avec les fonctions du package *dummy* :
+```{r}
+head(get.dummy(dummy.data.frame(data,sep="."),"channel"),4)
+```
+Après transformation et ajout des nouvelles colonnes, nous obtenons le dataset suivant :
+```{r echo=TRUE}
+head(data,4)
+```
+Nous supprimons les anciennes colonnes catégorielles :
+```{r echo=TRUE}
+data <- data[,!(names(data) %in% col_categorial)]
+head(data)
+```
+#3. Création des variables X et Y
+Nous définissons les données du modèle de cette façon :
+
+* X = les variables explicatives
+* Y = la variable expliquée
+
+L'objectif est de trouver une relation entre X et Y en construisant une fonction de prédiction **f(X)=Y** en utilisant la méthode de l'apprentissage supervisé.
+
+```{r}
+#Variable à prédir
+y <- subset(data,select=c('visit'))
+
+#Variables explicatives
+x <- subset(data,select=c('recency', 'history', 'mens', 'womens', 'newbie',
+                          'Rural', 'Surburban', 'Urban', 'Multichannel', 'Phone', 'Web',
+                          'Mens E-Mail', 'No E-Mail', 'Womens E-Mail'))
+
+#Jointure des variables explicatives et variable expliquee
+xy <- cbind(x,y)
+```
+
+#4. Distribution des données
+###Variables explicatives
+Les graphiques ci-dessous représentent les fréquences d'apparition des valeurs en fonction des classes de valeurs obtenues depuis le dataset.
+```{r}
+par(mfrow=c(2,4), oma = c(2,2,0,0), mar = c(2,2,2,2))
+for(c in x_var) {
+  hist(x[[c]],
+      col="blue",
+      las=1,
+      main=c)
+}
+```
+À titre d'exemple, nous pouvons remarquer que la distribution de la variable *Rural* est fortement inégale. Cela signifie que parmi les 64 000 clients qui ont effectué un achat dans les douze derniers mois, seulement 15% des client sont issus d'un milieu rural.
+
+###Variable expliquée
+```{r}
+par(mfrow=c(1,1), oma = c(2,2,2,2), mar = c(2,2,2,2))
+hist(y[['visit']],col="blue",las=1,main="visit")
+data.frame(table(unlist(y$visit)))
+```
+De même, la distribution de la variable *visit* est très inégale. La fréquence d'apparition du chiffre 1 est de 14,6% contre 85,3% pour le chiffre 0. Nous avons donc une plus forte probabilité de prédir correctement un 0 lors de l'étape de prédiction des données de test.
+
+#5. Séparation des données
+
+En vue d'obtenir un bon modèle de Machine Learning, nous allons mettre en place un cadre de validation croisée. Cela va nous permettre entre autres de prédir correctement la variable expliquée tout en évitant les phénomènes de sous-apprentissage et de sur-apprentissage. Pour cela, nous allons couper notre jeu de données en deux parties :
+
+* Les données d'apprentissage qui vont entraîner l'algorithme.
+* Les données de test qui ne seront pas vues par l'algorithme et qui vont permettre d'évaluer sa performance.
+
+Un algorithme peut avoir une très bonne performance sur des données d'apprentissage et être médiocre sur de nouvelles données : on appelle cela l'*overfitting*.
+
+```{r}
+set.seed(1)
+train_index <- sample(nrow(xy),0.33*nrow(xy))
+
+data_train <- xy[train_index,]
+data_test <- xy[-train_index,]
+```
+
+Nous décidons de couper nos données du dataset de la façon suivante : 
+
+* 33% des données choisies aléatoirement sont des données d'apprentissage
+* 67% des données choisies aléatoirement sont des données de test
+
+#6. Apprentissage des données
+
+C'est dans cette partie que nous allons appliquer l'algorithme à nos données d'apprentissage *data_train* en utilisant la fonction *rpart* du package *rpart*. Cette fonction permet de construire un arbre de décision de type classification ou de type régression. Dans notre cas, il s'agit d'un arbre de classification car la variable expliquée est une variable de type nominale. L'étape de partionnement va permettre de réduire l'impureté totale des deux noeuds fils par rapport au noeud père.
+
+```{r}
+library(rpart)
+train_fit <- rpart(visit~.,data=data_train,method="class",
+                   control=rpart.control(maxdepth=15,minsplit = 5,cp=0))
+
+```
+
+La formule utilisée *visit~.* signifie que nous allons prédir la variable *visit* en fonction des autres variables.
+
+Initialement, nous avons utilisé la méthode *rpart* par défaut (sans utiliser le paramètre *control*) et nous obtenions un arbre sans branches. Cela est sans doute dû au fait que les variables ne fournissent pas suffisamment d'informations et que le meilleur modèle trouvé est un arbre sans branches. Nous avons donc joué sur la valeur des paramètres de *rpart.control* pour obtenir un résultat interprétable :
+
+* Une profondeur maximale de 15 (*maxdepth=15*)
+* Un découpage de feuille a lieu lorsque celle-ci contient au moins 5 observations (*minsplit=5*)
+* Absence de contrainte sur la qualité du découpage (*cp=0*)
+
+```{r echo=TRUE}
+plotcp(train_fit)
+```
+
+Afin d'évaluer les résultats de performance de prédiction, nous les affichons grâce à la fonction *plotcp*, comme ci-dessus. La courbe indique le taux de mauvaises classifications relativement au score d'origine, estimé par validation croisée. Étant donné que 54 606 clients n'ont pas visité le site dans les deux semaines qui ont suivies sur un total de 64 000 clients, l'erreur de référence est définie à 85% ($54606/64000$). L'axe des abscisses indique la complexité de l'arbre par rapport au nombre de feuilles.
+
+Comme nous pouvons le constater, les performances se dégradent de plus en plus lorsque le nombre de feuilles augmente. L'arbre qui présente la meilleure performance est un arbre composé d'une seule feuille puisque sa taille d'arborescence minimise l'erreur validée croisée. Le paramètre de complexité optimal (minimal) s'obtient de cette façon :
+```{r echo=FALSE}
+cpOptimal <- train_fit$cptable[which.min(train_fit$cptable[,4]),1]
+head(train_fit$cptable,3)
+cat("\nParamètre de complexité optimal : ",cpOptimal)
+```
+À partir de la valeur du *cp* optimal, nous réalisons un élagage de l'arbre afin d'éviter le phénomène d'*overfitting* grâce à la méthode *prune*. Voici à quoi ressemble l'arbre optimal obtenu grâce à la fonction *prp* du package *rpart.plot* :
+```{r echo=TRUE}
+library(rpart.plot)
+arbreOptimal <- prune(train_fit,cp=cpOptimal)
+prp(arbreOptimal,extra=3)
+```
+Nous obtenons bien un arbre à une seule feuille qui montre que sur les 33% de la totalité des clients (ce qui correspond à la part des données d'apprentissage séléctionnées), l'algorithme a prédit que 18 060 clients n'ont pas visité le site web contre 3 060 l'ayant visité.
+
+#7. Validation
+
+###Prédictions sur les données de test
+La dernière étape consiste à tester et valider nos résultats sur les données de test. Pour cela, nous allons utiliser la fonction *predict* qui va nous permettre de faire la prédiction d'un modèle sur les données de test à partir de l'arbre optimal :
+```{r echo=TRUE}
+predicted <- predict(arbreOptimal, data_test,type="class")
+table(predicted)
+```
+
+```{r echo=TRUE}
+head(predict(arbreOptimal, data_test))
+```
+
+La matrice représentée ci-dessus donne les estimations des probabilités sur les six premières valeurs. On remarque que les probabilités sur les 0 et sur les 1 restent inchangées. Cela est dû au fait que nous avons séléctionné le *cp* associé à la prédiction naïve (l'algorithme ne va prédir que des 0 ou que des 1).
+
+###Matrice de confusion
+
+```{r echo=TRUE}
+#Valeurs de la variable expliquee actuelle dans les donnees de test
+actual <- data_test$visit
+
+#Matrice de confusion
+mc <- table(actual=actual,predicted=predicted)
+print(mc)
+```
+
+La matrice de confusion nous montre qu'à l'issue des prédictions faites par l'algorithme, ce dernier ne s'est jamais trompé pour la prédiction des 1. Ce résultat est totalement cohérent pusque l'algorithme ne prédit que des 0. En revanche, cela se traduit par un taux de prédiction nul en ce qui concerne les 1.
+
+###Erreurs de classement et taux de prédiction
+
+```{r}
+mc/sum(mc)
+```
+
+En affichant les taux de prédiction et les erreurs de classement, nous pouvons analyser et valider plus facilement nos résultats. Nous pouvons constater que la qualité de la prédiction dépend majoritairement de la classe *pas de visite* car cette dernière apparaît beaucoup plus fréquemment que la classe *visite* dans notre jeu de données. En effet, les clients n'ayant pas visité le site internet dans les deux semaines qui ont suivies représentent 85,3% de l'effectif total. Sur les 36 641 clients n'ayant pas visité le site, le taux de prévisions correctes est de 100%, alors que sur les 6 239 clients ayant visite le site, le taux de prédiction est de 0%. L'arbre de décision n'arrivera donc pas à obtenir de meilleures performances que celles obtenues avec la prédiction naïve. Nous pouvons émettre l'hypothèse que l'arbre préferera prédir tout le temps que des 0 et donc d'assurer une taux de prédiction maximal des 0 au détriment de celui des 1. 
+
+Pour mieux comprendre ce phénomène, nous pouvons le comparer à celui de la prédiction d'une maladie rare. Étant donné qu'il s'agit d'une maladie rare, son taux d'appartion sur un ensemble d'individus pris au hasard sera extrêmement faible. Sur le même principe, si nous devions prédir à un patient s'il est porteur de la maladie en fonction d'un certain nombre de paramètres le concernant, nous préfererions nous tromper sur la présence de la maladie plutôt que sur son absence.
+
+### Interprétation
+
+Au vu des résultats obtenus, nous pouvons sans doute supposer qu'il est très difficile pour l'algorithme de prédir correctement des 1 tout en ayant un arbre décisionnel sans trop de complexité à l'aide des variables explicatives. La relation qui relie X et Y restera toujours approximative car les variables explicatives ont peu d'influence sur la variable expliquée.
